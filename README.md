@@ -16,7 +16,7 @@ using namespace ogr;
 using namespace ogr_main;
 using namespace ogr_hal_esp32;
 
-OgrEsp32Transport transport(Wire, /*sda=*/21, /*scl=*/22);
+OgrEsp32Transport transport(Wire, /*sda=*/21, /*scl=*/22, /*en=*/5);
 OgrMaster master(transport);
 
 void onDiscovered(const ModuleInfo &m) {
@@ -36,10 +36,24 @@ void loop() {
 See [examples/BasicScan](examples/BasicScan) for a complete sketch, including
 reading an endpoint's data window.
 
-SDA/SCL and which hardware I2C peripheral to bind to (`Wire` or `Wire1`) are
-constructor arguments to `OgrEsp32Transport` — nothing about the pin layout
-is baked into the library. Bus speed is fixed at 100 kHz internally (spec
-§1 — a hard physical constraint, not a free parameter).
+SDA/SCL, which hardware I2C peripheral to bind to (`Wire` or `Wire1`), and
+the EN output pin are all constructor arguments to `OgrEsp32Transport` —
+nothing about the pin layout is baked into the library. Bus speed is fixed
+at 100 kHz internally (spec §1 — a hard physical constraint, not a free
+parameter).
+
+**Drive EN explicitly — don't assume a board hardwires it high.** Spec §3.1
+requires the master to assert HIGH on the EN line feeding the bottom
+module. `OgrEsp32Transport`'s `enPin` constructor argument does exactly
+that (once, in `begin()`) — pass -1 only if you've actually confirmed your
+board drives EN high in hardware with nothing left floating. This was found
+the hard way on real hardware: an EN line left as an unconfigured/floating
+input measured a marginal ~3V instead of a clean 5V (through a level
+converter with its own bias network), which was just borderline enough to
+make node discovery intermittent and very confusing to debug — reads would
+sometimes get an address ACK and sometimes not, with no code-side pattern
+to it, because the real variable was an unrelated floating pin, not
+anything in the read sequence itself.
 
 ## Design notes
 

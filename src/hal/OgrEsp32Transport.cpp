@@ -6,10 +6,16 @@ namespace {
 constexpr uint32_t kBusFrequencyHz = 100000; // spec §1: Standard Mode, fixed
 }
 
-OgrEsp32Transport::OgrEsp32Transport(TwoWire &wire, int sdaPin, int sclPin)
-    : wire_(wire), sdaPin_(sdaPin), sclPin_(sclPin) {}
+OgrEsp32Transport::OgrEsp32Transport(TwoWire &wire, int sdaPin, int sclPin, int enPin)
+    : wire_(wire), sdaPin_(sdaPin), sclPin_(sclPin), enPin_(enPin) {}
 
-void OgrEsp32Transport::begin() { wire_.begin(sdaPin_, sclPin_, kBusFrequencyHz); }
+void OgrEsp32Transport::begin() {
+  if (enPin_ >= 0) {
+    pinMode(enPin_, OUTPUT);
+    digitalWrite(enPin_, HIGH);
+  }
+  wire_.begin(sdaPin_, sclPin_, kBusFrequencyHz);
+}
 
 ogr_main::BusResult OgrEsp32Transport::mapEndTransmissionResult(uint8_t code) {
   switch (code) {

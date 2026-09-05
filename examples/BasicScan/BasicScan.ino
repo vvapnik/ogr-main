@@ -12,8 +12,9 @@ using namespace ogr_hal_esp32;
 
 constexpr int kSdaPin = 21;
 constexpr int kSclPin = 22;
+constexpr int kEnPin = 5; // feeds EN_IN of the bottom module via the level converter
 
-OgrEsp32Transport transport(Wire, kSdaPin, kSclPin);
+OgrEsp32Transport transport(Wire, kSdaPin, kSclPin, kEnPin);
 OgrMaster master(transport);
 
 void onDiscovered(const ModuleInfo &m) {
