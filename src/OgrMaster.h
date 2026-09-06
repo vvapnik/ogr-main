@@ -30,6 +30,14 @@ namespace ogr_main {
 
 using ModuleEventCallback = void (*)(const ModuleInfo &module);
 
+// Fired at each key step of enumeration and orphan discovery — purely a
+// diagnostics hook, never required for correctness. `stage` is a short
+// static string identifying the step, `address` is whatever address that
+// step targeted, `ok` is whether that specific step succeeded. Intended for
+// bring-up/debugging (e.g. wiring this to Serial), not routine operation —
+// see the per-call sites in OgrMaster.cpp for exactly which stages fire.
+using DebugTraceCallback = void (*)(const char *stage, uint8_t address, bool ok);
+
 class OgrMaster {
 public:
   explicit OgrMaster(IOgrMasterTransport &transport);
@@ -48,6 +56,7 @@ public:
   void onModuleProblem(ModuleEventCallback cb) { problemCb_ = cb; }
   void onModuleRecovered(ModuleEventCallback cb) { recoveredCb_ = cb; } // Problem -> Ok
   void onModuleRemoved(ModuleEventCallback cb) { removedCb_ = cb; }
+  void onDebugTrace(DebugTraceCallback cb) { traceCb_ = cb; }
 
   // Starts the transport and arms an immediate full-range scan — spec §3.3:
   // "must always run once, unconditionally, on master startup".
@@ -91,10 +100,12 @@ private:
   void tickHealthCheck(uint32_t now);
   void tickScanForNew(uint32_t now);
   void tickFullRangeScan(uint32_t now);
+  void tickPendingVerification(uint32_t now);
 
   void healthCheckOne(uint8_t index);
-  void probeForNewModule();
-  bool registerModuleAtDefaultAddress(ogr::ClassId classId, uint8_t epCount, uint8_t sysFlags);
+  void probeForNewModule(uint32_t now);
+  void beginRegisterModuleAtDefaultAddress(ogr::ClassId classId, uint8_t epCount, uint8_t sysFlags, uint32_t now);
+  void finishRegisterModule();
   uint8_t allocateFreeAddress() const;
   bool isKnownAddress(uint8_t address) const;
 
@@ -123,10 +134,31 @@ private:
   uint8_t fullRangeScanCursor_ = 0x01;
   bool fullRangeSweepPending_ = true; // forces the mandatory first sweep on begin()
 
+  // Spec §3.4: after SET_ADDR, the master waits kSetAddrSettleMs before
+  // verifying the node actually answers on its new address — a node's I2C
+  // peripheral isn't guaranteed to be listening the instant SET_ADDR's bus
+  // transaction ends (see OgrMaster.cpp for the real-hardware finding that
+  // motivated this). Non-blocking: update() paces itself against
+  // pendingVerifyAtMs_ the same way it paces the scan cycles, rather than
+  // stalling the whole call for kSetAddrSettleMs.
+  bool pendingVerification_ = false;
+  uint8_t pendingAddress_ = 0;
+  ogr::ClassId pendingClassId_ = ogr::ClassId::Custom;
+  uint8_t pendingEpCount_ = 0;
+  uint8_t pendingSysFlags_ = 0;
+  uint32_t pendingSetAddrMs_ = 0; // when SET_ADDR was written — verify once kSetAddrSettleMs has elapsed since
+
   ModuleEventCallback discoveredCb_ = nullptr;
   ModuleEventCallback problemCb_ = nullptr;
   ModuleEventCallback recoveredCb_ = nullptr;
   ModuleEventCallback removedCb_ = nullptr;
+  DebugTraceCallback traceCb_ = nullptr;
+
+  void trace(const char *stage, uint8_t address, bool ok) {
+    if (traceCb_) {
+      traceCb_(stage, address, ok);
+    }
+  }
 };
 
 } // namespace ogr_main

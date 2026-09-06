@@ -5,6 +5,9 @@ namespace ogr_main {
 
 namespace {
 constexpr uint8_t regByte(ogr::Reg r) { return static_cast<uint8_t>(r); }
+
+// Spec §3.4. See the pendingVerification_ member comment in OgrMaster.h.
+constexpr uint32_t kSetAddrSettleMs = 50;
 } // namespace
 
 OgrMaster::OgrMaster(IOgrMasterTransport &transport) : transport_(&transport) {}
@@ -16,6 +19,7 @@ void OgrMaster::begin() {
   healthCheckCursor_ = 0;
   lastHealthCheckMs_ = 0;
   lastScanForNewMs_ = 0;
+  pendingVerification_ = false;
 
   // Spec §3.3: the full-range scan "must always run once, unconditionally,
   // on master startup" — this is exactly that scenario (table starts empty
@@ -26,6 +30,7 @@ void OgrMaster::begin() {
 }
 
 void OgrMaster::update(uint32_t nowMs) {
+  tickPendingVerification(nowMs);
   tickFullRangeScan(nowMs);
   tickScanForNew(nowMs);
   tickHealthCheck(nowMs);
@@ -291,16 +296,21 @@ void OgrMaster::healthCheckOne(uint8_t index) {
 // ---- Scan-for-new cycle — spec §3.3 --------------------------------------
 
 void OgrMaster::tickScanForNew(uint32_t now) {
+  if (pendingVerification_) {
+    return; // one enumeration in flight at a time — see tickPendingVerification()
+  }
   if (now - lastScanForNewMs_ < scanForNewPeriodMs_) {
     return;
   }
   lastScanForNewMs_ = now;
-  probeForNewModule();
+  probeForNewModule(now);
 }
 
-void OgrMaster::probeForNewModule() {
+void OgrMaster::probeForNewModule(uint32_t now) {
   uint8_t classByte;
-  if (readRegisterRaw(ogr::kDefaultAddress, regByte(ogr::Reg::Class), &classByte, 1) != ReadOutcome::Success) {
+  bool gotClass = readRegisterRaw(ogr::kDefaultAddress, regByte(ogr::Reg::Class), &classByte, 1) == ReadOutcome::Success;
+  trace("read-class-0x08", ogr::kDefaultAddress, gotClass);
+  if (!gotClass) {
     return; // nothing at 0x08 (or a transient hiccup) — tried again next period, nothing else to do
   }
 
@@ -309,40 +319,73 @@ void OgrMaster::probeForNewModule() {
   uint8_t sysFlags = 0;
   readRegisterRaw(ogr::kDefaultAddress, regByte(ogr::Reg::SysFlags), &sysFlags, 1);
 
-  registerModuleAtDefaultAddress(static_cast<ogr::ClassId>(classByte), epCount, sysFlags);
+  beginRegisterModuleAtDefaultAddress(static_cast<ogr::ClassId>(classByte), epCount, sysFlags, now);
 }
 
-bool OgrMaster::registerModuleAtDefaultAddress(ogr::ClassId classId, uint8_t epCount, uint8_t sysFlags) {
+void OgrMaster::beginRegisterModuleAtDefaultAddress(ogr::ClassId classId, uint8_t epCount, uint8_t sysFlags,
+                                                     uint32_t now) {
   uint8_t newAddr = allocateFreeAddress();
   if (newAddr == 0) {
-    return false; // table full / address pool exhausted
+    return; // table full / address pool exhausted
   }
 
-  if (!writeSystemByte(ogr::kDefaultAddress, ogr::Reg::SetAddr, newAddr)) {
-    return false; // bus-level failure; module is presumably still at 0x08, retried next pass
+  bool wroteAddr = writeSystemByte(ogr::kDefaultAddress, ogr::Reg::SetAddr, newAddr);
+  trace("write-set-addr", newAddr, wroteAddr);
+  if (!wroteAddr) {
+    return; // bus-level failure; module is presumably still at 0x08, retried next pass
   }
+
+  // Spec §3.4: a node may need a moment to actually start listening on its
+  // new address — reprogramming an I2C peripheral is not always the
+  // sub-microsecond register write it is on a bare-metal AVR/USI target.
+  // Measured on an ESP32-S3 (ESP-IDF's driver/i2c_slave.h, which tears down
+  // and recreates the whole slave device on an address change): ~0.9ms
+  // worst case. kSetAddrSettleMs gives comfortable margin above that.
+  // Non-blocking — tickPendingVerification() picks this back up once
+  // kSetAddrSettleMs has actually elapsed, rather than stalling update().
+  pendingVerification_ = true;
+  pendingAddress_ = newAddr;
+  pendingClassId_ = classId;
+  pendingEpCount_ = epCount;
+  pendingSysFlags_ = sysFlags;
+  pendingSetAddrMs_ = now;
+}
+
+void OgrMaster::tickPendingVerification(uint32_t now) {
+  if (!pendingVerification_) {
+    return;
+  }
+  if (now - pendingSetAddrMs_ < kSetAddrSettleMs) {
+    return; // kSetAddrSettleMs hasn't elapsed yet
+  }
+  pendingVerification_ = false;
 
   // Spec §5.3 (revised): a write is never confirmed in-band, so a SET_ADDR
   // this critical is worth an explicit read-back before trusting it.
   uint8_t protVer = 0;
-  if (readRegisterRaw(newAddr, regByte(ogr::Reg::ProtVer), &protVer, 1) != ReadOutcome::Success) {
-    return false; // SET_ADDR didn't take; module stays UNASSIGNED, picked up again next scan-for-new pass
+  bool verified = readRegisterRaw(pendingAddress_, regByte(ogr::Reg::ProtVer), &protVer, 1) == ReadOutcome::Success;
+  trace("read-new-addr", pendingAddress_, verified);
+  if (!verified) {
+    return; // SET_ADDR didn't take; module stays UNASSIGNED, picked up again next scan-for-new pass
   }
 
+  finishRegisterModule();
+}
+
+void OgrMaster::finishRegisterModule() {
   ModuleInfo *slot = addModuleSlot();
   if (!slot) {
-    return false;
+    return;
   }
-  slot->address = newAddr;
-  slot->classId = classId;
-  slot->epCount = epCount;
-  slot->sysFlags = sysFlags;
+  slot->address = pendingAddress_;
+  slot->classId = pendingClassId_;
+  slot->epCount = pendingEpCount_;
+  slot->sysFlags = pendingSysFlags_;
   slot->state = ModuleState::Ok;
 
   if (discoveredCb_) {
     discoveredCb_(*slot);
   }
-  return true;
 }
 
 // ---- Full-range scan + orphan recovery — spec §3.3/§3.5 ------------------
@@ -376,6 +419,7 @@ void OgrMaster::tickFullRangeScan(uint32_t now) {
     // significantly, and the next scheduled sweep will catch anything left.
     fullRangeSweepPending_ = false;
     lastFullRangeScanMs_ = now;
+    trace("orphan-found", addr, true);
     recoverOrphan(addr);
   }
 }
