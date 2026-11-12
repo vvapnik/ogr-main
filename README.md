@@ -34,7 +34,9 @@ void loop() {
 ```
 
 See [examples/BasicScan](examples/BasicScan) for a complete sketch, including
-reading an endpoint's data window.
+reading an endpoint's data window. A zoomable map of the library's parts is
+in [`ARCHITECTURE.takesix.json`](ARCHITECTURE.takesix.json) (a TakeSix
+diagram).
 
 SDA/SCL, which hardware I2C peripheral to bind to (`Wire` or `Wire1`), and
 the EN output pin are all constructor arguments to `OgrEsp32Transport` —
@@ -119,3 +121,7 @@ pio ci examples/BasicScan/BasicScan.ino --lib="." --board=esp32dev
 pio ci examples/BasicScan/BasicScan.ino --lib="." --board=esp32-s3-devkitc-1
 pio ci examples/BasicScan/BasicScan.ino --lib="." --board=esp32-c3-devkitm-1
 ```
+
+---
+
+Development is assisted by [Claude Code](https://claude.com/claude-code) (Anthropic).

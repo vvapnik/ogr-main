@@ -1,0 +1,110 @@
+{
+  "takesix": "1.0",
+  "title": "ogr-main",
+  "description": "OGR head-module (I2C master) library: the sketch on top, the bus only through one transport interface",
+  "blocks": [
+    {
+      "id": "sketch",
+      "at": "A1:C1",
+      "icon": "✍",
+      "title": "Your sketch",
+      "description": "begin(), update(), events",
+      "details": "Sources: `README.md` (Usage), `examples/BasicScan/BasicScan.ino`, `src/OgrMainEsp32.h`\n\n1. `#include <OgrMainEsp32.h>` — engine plus ESP32 transport.\n2. Create `OgrEsp32Transport transport(Wire, sda, scl, en)` and `OgrMaster master(transport)`.\n3. Register events: `onModuleDiscovered`, `onModuleProblem`, `onModuleRecovered`, `onModuleRemoved`, optional `onDebugTrace`.\n4. `master.begin()` in `setup()`, `master.update(millis())` in `loop()`.\n5. Read the table with `moduleCount()` / `moduleAt()` and use the register API for endpoints.\n\n`examples/BasicScan` is a complete sketch, built in CI for esp32dev, ESP32-S3 and ESP32-C3."
+    },
+    {
+      "id": "engine",
+      "at": "A3:C3",
+      "icon": "⬡",
+      "title": "OgrMaster engine",
+      "description": "src/OgrMaster.h, OgrMaster.cpp",
+      "children": [
+        {
+          "id": "engine-cycles",
+          "at": "A1:B2",
+          "icon": "⏱",
+          "title": "Scan cycles",
+          "description": "update(): one step per call",
+          "details": "Source: `src/OgrMaster.cpp` `update()`, `tickHealthCheck()`, `tickScanForNew()`, `tickFullRangeScan()`\n\n- **Health-check** every 50 ms: one known module per tick (`healthCheckOne()`).\n- **Scan-for-new** every 200 ms: probe `0x08`.\n- **Full-range** every 30 s, and once right after `begin()`: one address per tick over `0x01–0x77`.\n- Each `update()` does at most one bus transaction's worth of work and never blocks for a full sweep.\n- Periods and thresholds are tunable via `set*()` before `begin()`."
+        },
+        {
+          "id": "engine-enumeration",
+          "at": "C1:D2",
+          "icon": "🪜",
+          "title": "Enumeration",
+          "description": "SET_ADDR, wait, verify",
+          "details": "Source: `src/OgrMaster.cpp` `probeForNewModule()`, `beginRegisterModuleAtDefaultAddress()`, `tickPendingVerification()`, `finishRegisterModule()`, `allocateFreeAddress()`\n\n- A module on `0x08`: read `CLASS`, `EP_COUNT`, `SYS_FLAGS`, write `SET_ADDR`.\n- Then a **non-blocking** settle wait (`kSetAddrSettleMs`, 50 ms), then read `PROT_VER` back at the new address before adding the module to the table.\n- New addresses come from `0x09–0x77`; `0x01–0x07` are left unused by choice, not by spec."
+        },
+        {
+          "id": "engine-orphans",
+          "at": "E1:F2",
+          "icon": "↻",
+          "title": "Orphan recovery",
+          "description": "Top-down restarts",
+          "details": "Source: `src/OgrMaster.cpp` `recoverOrphan()` (synchronous)\n\n- An unknown address found by the full-range scan is never adopted in place (spec §3.5).\n- Restart known modules from the topmost down until the orphan stops answering; it then re-enumerates in physical order.\n- **Empty table fallback** (fresh master reboot): restart the orphan directly. Not spelled out in the spec; flagged in `README.md` as an interpretation to confirm."
+        },
+        {
+          "id": "engine-table",
+          "at": "A4:C5",
+          "icon": "▤",
+          "title": "Module table",
+          "description": "src/OgrModule.h: fixed 12 slots, states, events",
+          "details": "Sources: `src/OgrModule.h`, `src/OgrMaster.cpp` `healthCheckOne()`, `addModuleSlot()`, `removeModuleAt()`\n\n- `ModuleInfo`: address, class, endpoint count, flags, state (`Ok` / `Problem`).\n- Up to `OGR_MAX_MODULES` (default 12, the spec's per-chain limit); no dynamic allocation.\n- Two separate counters: `addressNackStreak` → removed after K NACKs; `responseFailStreak` (STATUS ≠ 0, exhausted retries) → `Problem` after N.\n- UNASSIGNED modules are not in the table yet; REMOVED ones are deleted."
+        },
+        {
+          "id": "engine-registers",
+          "at": "D4:F5",
+          "icon": "⇄",
+          "title": "Register API",
+          "description": "Reads retry 3×, writes are fire-and-forget",
+          "details": "Source: `src/OgrMaster.cpp` `readRegisterRaw()` and the public `read*` / `write*` methods\n\n- System bytes, `restart()`, `selectEndpoint()`, endpoint descriptor and data, PLANT_UID, blueprint UID.\n- Every frame carries a CRC-8/SMBUS PEC (`writePec()`, `readPec()`).\n- Reads retry up to 3 times on a PEC mismatch; an address NACK is never retried, it feeds the removal counter.\n- Writes report only bus-level delivery; read back or check `STATUS` when a write matters."
+        }
+      ]
+    },
+    {
+      "id": "transport",
+      "at": "A5:C5",
+      "icon": "🧩",
+      "title": "Bus transport",
+      "description": "Interface + ESP32 Wire HAL",
+      "children": [
+        {
+          "id": "transport-interface",
+          "at": "A2:C3",
+          "icon": "↔",
+          "title": "IOgrMasterTransport",
+          "description": "src/OgrMasterTransport.h",
+          "details": "Source: `src/OgrMasterTransport.h`\n\n- `begin()`, `write(address, payload, len)`, `writeRead(address, …, readBuf, readLen, outLen)`.\n- Result: `BusResult::Ok`, `AddressNack`, `DataNack`, `Error`.\n- The engine sees only this interface, so its logic runs on the host against a mock."
+        },
+        {
+          "id": "transport-esp32",
+          "at": "D2:F3",
+          "icon": "📟",
+          "title": "OgrEsp32Transport",
+          "description": "src/hal/: Arduino Wire, EN pin",
+          "details": "Source: `src/hal/OgrEsp32Transport.h`, `src/hal/OgrEsp32Transport.cpp`\n\n- Constructor: `TwoWire` (`Wire` or `Wire1`), SDA, SCL, EN pin. Nothing is pinned to a board.\n- Bus speed fixed at 100 kHz (spec §1).\n- **Drives EN high once in `begin()`.** Pass `-1` only if the board really hardwires EN: a floating EN pin measured ~3 V and made discovery intermittent on real hardware.\n- Maps `Wire.endTransmission()` codes to `BusResult`."
+        }
+      ]
+    },
+    {
+      "id": "types",
+      "at": "E3:F3",
+      "icon": "🔢",
+      "title": "Constants",
+      "description": "Registers, IDs",
+      "details": "Sources: `src/OgrTypes.h`, `src/OgrCrc8.h`\n\n- `OgrTypes.h` mirrors the spec's register map, `Status`, `RestartType`, flags, `ClassId`, `TypeId`, `Mode`, `Format` (same constants as in `ogr-node-core`, kept as a copy).\n- `OgrCrc8.h`: CRC-8/SMBUS for the PEC byte."
+    },
+    {
+      "id": "tests",
+      "at": "E5:F5",
+      "icon": "🧪",
+      "title": "Host tests",
+      "description": "Native, Unity",
+      "details": "Sources: `test/test_master/test_master.cpp`, `test/test_crc8/test_crc8.cpp`, `test/mocks/MockMasterTransport.h`, `platformio.ini`\n\n- `pio test -e native`: the engine runs against a small bus simulator.\n- Covered: address assignment and registration order, health-check Ok / Problem (STATUS and comm failures) / Removed, orphan recovery (cascade and empty-table fallback), endpoint data round trip.\n- The example is also built for three ESP32 boards with `pio ci` (commands in `README.md`)."
+    }
+  ],
+  "links": [
+    { "from": "sketch", "to": "engine", "label": "begin, update" },
+    { "from": "engine", "to": "transport", "label": "write, writeRead" },
+    { "from": "tests", "to": "transport", "label": "mock", "style": "dashed" }
+  ]
+}
